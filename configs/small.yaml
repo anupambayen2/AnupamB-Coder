@@ -1,0 +1,22 @@
+# Small GPT — fits comfortably in 8GB VRAM
+model:
+  vocab_size  : 32000
+  block_size  : 512
+  n_layer     : 6
+  n_head      : 8
+  n_embd      : 512
+  dropout     : 0.1
+  bias        : true
+
+training:
+  batch_size        : 4
+  grad_accum_steps  : 8
+  learning_rate     : 3.0e-4
+  min_lr            : 3.0e-5
+  max_steps         : 50000
+  warmup_steps      : 1000
+  eval_interval     : 500
+  save_interval     : 1000
+  grad_clip         : 1.0
+  weight_decay      : 0.1
+  fp16              : true

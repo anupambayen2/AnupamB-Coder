@@ -1,0 +1,12 @@
+data/
+checkpoints/
+logs/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ipynb_checkpoints/
+.vscode/
+.minigpt
+.gradio
