@@ -17,7 +17,8 @@ from src.model.gpt import GPT, GPTConfig
 # run_001     = stage 1   — 100K steps on 535K examples
 # run_002     = stage 2   — 22GB new data
 # run_003     = stage 3   — stack_dedup 60GB
-CHECKPOINT_DIR = os.path.join(ROOT, "checkpoints", "smoke_test")
+# CHECKPOINT_DIR = os.path.join(ROOT, "checkpoints", "smoke_test")
+CHECKPOINT_DIR = os.path.join(ROOT, "checkpoints", "run_001")
 
 
 # ── Load model ────────────────────────────────────────────────

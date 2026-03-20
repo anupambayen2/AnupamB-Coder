@@ -8,6 +8,7 @@ sys.path.insert(0, ROOT)
 import math
 import time
 import json
+import glob
 import torch
 from torch.amp import GradScaler, autocast
 from datetime import datetime
@@ -25,12 +26,12 @@ class TrainConfig:
     vocab_size  = 32000
     block_size  = 1024
     n_layer     = 12
-    n_head      = 12    # updated from 16
-    n_embd      = 768   # updated from 1024
+    n_head      = 12
+    n_embd      = 768
     dropout     = 0.1
     bias        = True
 
-    # ── Training ─────────────────────────────────────────────
+    # ── Training defaults (overridden per stage below) ────────
     batch_size              = 2
     grad_accum_steps        = 16    # effective batch = 32
     max_steps               = 100000
@@ -40,18 +41,18 @@ class TrainConfig:
     weight_decay            = 0.1
     grad_clip               = 1.0
 
-    # ── Intervals ────────────────────────────────────────────
+    # ── Intervals ─────────────────────────────────────────────
     eval_interval           = 500
     eval_steps              = 50
     save_interval           = 1000
     log_interval            = 10
 
-    # ── Hardware ─────────────────────────────────────────────
+    # ── Hardware ──────────────────────────────────────────────
     device                  = "cuda" if torch.cuda.is_available() else "cpu"
     fp16                    = True
     use_8bit_adam           = True
 
-    # ── Stage ────────────────────────────────────────────────
+    # ── Stage ─────────────────────────────────────────────────
     stage                   = 1
 
 
@@ -88,9 +89,12 @@ def evaluate(model, val_loader, cfg: TrainConfig) -> dict:
 
 
 # ── Checkpoint save ───────────────────────────────────────────
-def save_checkpoint(model, optimizer, scaler, step, loss, cfg: TrainConfig):
+def save_checkpoint(
+    model, optimizer, scaler, step, loss, cfg: TrainConfig
+):
     ckpt_dir = checkpoint_dir(cfg.stage)
     os.makedirs(ckpt_dir, exist_ok=True)
+
     path = os.path.join(ckpt_dir, f"step_{step:06d}.pt")
     torch.save({
         "step"        : step,
@@ -108,23 +112,48 @@ def save_checkpoint(model, optimizer, scaler, step, loss, cfg: TrainConfig):
         },
     }, path)
     print(f"  [ckpt] saved → {path}")
+
+    # ── Keep only last 3 step checkpoints ─────────────────────
+    # best.pt is NEVER deleted
+    all_ckpts = sorted(glob.glob(
+        os.path.join(ckpt_dir, "step_*.pt")
+    ))
+    if len(all_ckpts) > 3:
+        for old in all_ckpts[:-3]:
+            try:
+                os.remove(old)
+                print(
+                    f"  [ckpt] removed old → "
+                    f"{os.path.basename(old)}"
+                )
+            except Exception:
+                pass
+
     return path
 
 
 # ── Checkpoint load ───────────────────────────────────────────
-def load_checkpoint(model, optimizer, scaler, path: str, device: str):
+def load_checkpoint(
+    model, optimizer, scaler, path: str, device: str
+):
     print(f"  [ckpt] loading → {path}")
     ckpt  = torch.load(path, map_location=device)
     state = ckpt["model_state"]
-    state = {k.replace("_orig_mod.", ""): v for k, v in state.items()}
+    state = {
+        k.replace("_orig_mod.", ""): v
+        for k, v in state.items()
+    }
     model.load_state_dict(state, strict=False)
+
     if optimizer and "optim_state" in ckpt:
         try:
             optimizer.load_state_dict(ckpt["optim_state"])
         except Exception:
-            print("  [ckpt] optimizer state skipped")
+            print("  [ckpt] optimizer state skipped — fresh start")
+
     if scaler and "scaler_state" in ckpt:
         scaler.load_state_dict(ckpt["scaler_state"])
+
     step = ckpt.get("step", 0)
     loss = ckpt.get("loss", 0.0)
     print(f"  [ckpt] resumed step {step}  loss {loss:.4f}")
@@ -135,40 +164,53 @@ def load_checkpoint(model, optimizer, scaler, path: str, device: str):
 class Logger:
     def __init__(self, stage: int):
         os.makedirs(LOG_DIR, exist_ok=True)
-        self.path = stage_log(stage)
-        self.t0   = time.time()
+        self.path  = stage_log(stage)
+        self.t0    = time.time()
+        self.stage = stage
+
+        # Write start marker
+        with open(self.path, "a") as f:
+            f.write(json.dumps({
+                "event" : "training_start",
+                "stage" : stage,
+                "ts"    : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }) + "\n")
+        print(f"  Log file            : {self.path}")
 
     def write(self, data: dict):
         data["ts"]  = datetime.now().strftime("%H:%M:%S")
         data["min"] = round((time.time() - self.t0) / 60, 1)
-        with open(self.path, "a") as f:
-            f.write(json.dumps(data) + "\n")
+        try:
+            with open(self.path, "a") as f:
+                f.write(json.dumps(data) + "\n")
+        except Exception as e:
+            print(f"  [log error] {e}")
 
-    # def print_step(self, step, loss, lr, dt_ms, vram_gb=None):
-    #     vram_s = f"  vram {vram_gb:.1f}GB" if vram_gb else ""
-    #     print(
-    #         f"  step {step:>7} | "
-    #         f"loss {loss:.4f} | "
-    #         f"lr {lr:.2e} | "
-    #         f"{dt_ms:5.0f} ms/step"
-    #         f"{vram_s}"
-    #     )
+    def print_step(
+        self, step, loss, lr, dt_ms,
+        vram_gb=None, max_steps=None,
+    ):
+        vram_s = f"  vram {vram_gb:.1f}GB" if vram_gb else ""
+        time_s = ""
 
-    def print_step(self, step, loss, lr, dt_ms, vram_gb=None, max_steps=None):
-        vram_s    = f"  vram {vram_gb:.1f}GB" if vram_gb else ""
-        time_s    = ""
         if max_steps:
             elapsed_min   = (time.time() - self.t0) / 60
-            remaining_min = ((max_steps - step) * dt_ms) / 1000 / 60
-            if elapsed_min < 60:
-                elapsed_s = f"{elapsed_min:.0f}m"
-            else:
-                elapsed_s = f"{elapsed_min/60:.1f}h"
-            if remaining_min < 60:
-                remain_s = f"~{remaining_min:.0f}m left"
-            else:
-                remain_s = f"~{remaining_min/60:.1f}h left"
+            remaining_min = (
+                (max_steps - step) * dt_ms
+            ) / 1000 / 60
+
+            elapsed_s = (
+                f"{elapsed_min:.0f}m"
+                if elapsed_min < 60
+                else f"{elapsed_min/60:.1f}h"
+            )
+            remain_s = (
+                f"~{remaining_min:.0f}m left"
+                if remaining_min < 60
+                else f"~{remaining_min/60:.1f}h left"
+            )
             time_s = f"  {elapsed_s} elapsed  {remain_s}"
+
         print(
             f"  step {step:>7} | "
             f"loss {loss:.4f} | "
@@ -177,7 +219,6 @@ class Logger:
             f"{vram_s}"
             f"{time_s}"
         )
-    
 
 
 # ── VRAM helper ───────────────────────────────────────────────
@@ -192,6 +233,55 @@ def train(resume_from=None, stage=1, max_steps=None):
     cfg       = TrainConfig()
     cfg.stage = stage
 
+    # ── Stage-specific LR and step config ─────────────────────
+    #
+    # Rule: each stage uses lower LR than previous
+    # to avoid destroying what was already learned
+    #
+    # Stage 1 — foundation on 535K clean examples
+    # Stage 2 — expand on 5.3M diverse examples
+    # Stage 3 — tech stack + problem solving
+    # Stage 4 — problem solving depth
+    # Stage 5 — SQL mastery
+    # Stage 6 — instruction fine-tuning
+
+    if stage == 1:
+        cfg.learning_rate = 3e-4
+        cfg.min_lr        = 3e-5
+        cfg.max_steps     = 100_000
+        cfg.warmup_steps  = 2_000
+
+    elif stage == 2:
+        cfg.learning_rate = 1e-4
+        cfg.min_lr        = 1e-5
+        cfg.max_steps     = 400_000
+        cfg.warmup_steps  = 1_000
+
+    elif stage == 3:
+        cfg.learning_rate = 2e-5
+        cfg.min_lr        = 2e-6
+        cfg.max_steps     = 300_000
+        cfg.warmup_steps  = 1_000
+
+    elif stage == 4:
+        cfg.learning_rate = 1e-5
+        cfg.min_lr        = 1e-6
+        cfg.max_steps     = 150_000
+        cfg.warmup_steps  = 500
+
+    elif stage == 5:
+        cfg.learning_rate = 5e-6
+        cfg.min_lr        = 5e-7
+        cfg.max_steps     = 80_000
+        cfg.warmup_steps  = 200
+
+    elif stage == 6:
+        cfg.learning_rate = 2e-6
+        cfg.min_lr        = 2e-7
+        cfg.max_steps     = 30_000
+        cfg.warmup_steps  = 200
+
+    # Command line override — takes priority over stage config
     if max_steps is not None:
         cfg.max_steps = max_steps
 
@@ -210,21 +300,22 @@ def train(resume_from=None, stage=1, max_steps=None):
     print(f"  Max steps           : {cfg.max_steps:,}")
     print(f"  Warmup steps        : {cfg.warmup_steps:,}")
     print(f"  Learning rate       : {cfg.learning_rate}")
+    print(f"  Min LR              : {cfg.min_lr}")
     print(f"  8-bit Adam          : {cfg.use_8bit_adam}")
     print(f"  Mixed precision     : {cfg.fp16}")
     print(f"  Checkpoint dir      : {checkpoint_dir(stage)}")
-    print(f"  Log file            : {stage_log(stage)}")
     print(f"{'─'*65}\n")
 
-    # ── Data ─────────────────────────────────────────────────
+    # ── Data ──────────────────────────────────────────────────
+    # stage= auto-selects correct files + cache name
     train_loader, val_loader, vocab_size = build_dataloaders(
         batch_size  = cfg.batch_size,
         num_workers = 0,
         block_size  = cfg.block_size,
-        cache_name  = "stage1_bs1024",
+        stage       = stage,
     )
 
-    # ── Model ────────────────────────────────────────────────
+    # ── Model ─────────────────────────────────────────────────
     model = GPT(GPTConfig(
         vocab_size = vocab_size,
         block_size = cfg.block_size,
@@ -243,7 +334,7 @@ def train(resume_from=None, stage=1, max_steps=None):
         print(f"  VRAM after load     : {vram:.2f} GB / 8.00 GB")
         print(f"  VRAM headroom       : {8.0 - vram:.2f} GB\n")
 
-    # ── Optimizer ────────────────────────────────────────────
+    # ── Optimizer ─────────────────────────────────────────────
     optimizer = build_optimizer(
         model,
         cfg.learning_rate,
@@ -252,13 +343,20 @@ def train(resume_from=None, stage=1, max_steps=None):
     )
     scaler = GradScaler(enabled=cfg.fp16)
 
-    # ── Resume ───────────────────────────────────────────────
+    # ── Resume ────────────────────────────────────────────────
     start_step = 0
     if resume_from and os.path.exists(resume_from):
         start_step, _ = load_checkpoint(
             model, optimizer, scaler,
             resume_from, cfg.device,
         )
+        # When resuming from a DIFFERENT stage
+        # reset step counter so LR schedule starts fresh
+        if stage > 1:
+            print(
+                f"  Starting fresh step counter for stage {stage}"
+            )
+            start_step = 0
 
     print("  torch.compile       : disabled (Windows)")
     model.train()
@@ -276,7 +374,7 @@ def train(resume_from=None, stage=1, max_steps=None):
 
     while step < cfg.max_steps:
 
-        # LR update
+        # ── LR update ─────────────────────────────────────────
         lr = get_lr(step, cfg)
         for g in optimizer.param_groups:
             g["lr"] = lr
@@ -313,7 +411,10 @@ def train(resume_from=None, stage=1, max_steps=None):
         # ── Log ───────────────────────────────────────────────
         if step % cfg.log_interval == 0:
             vram = get_vram_gb()
-            logger.print_step(step, loss_accum, lr, dt_ms, vram)
+            logger.print_step(
+                step, loss_accum, lr, dt_ms, vram,
+                max_steps = cfg.max_steps,
+            )
             logger.write({
                 "step"      : step,
                 "stage"     : stage,
@@ -327,16 +428,19 @@ def train(resume_from=None, stage=1, max_steps=None):
         # ── Eval ──────────────────────────────────────────────
         if step % cfg.eval_interval == 0:
             metrics = evaluate(model, val_loader, cfg)
-            print(f"\n  ── Eval @ step {step} "
-                  f"(stage {stage}) {'─'*25}")
+            print(
+                f"\n  ── Eval @ step {step} "
+                f"(stage {stage}) {'─'*25}"
+            )
             print(f"     val_loss   : {metrics['val_loss']:.4f}")
             print(f"     perplexity : {metrics['perplexity']:.2f}")
 
             if metrics["val_loss"] < best_val_loss:
                 best_val_loss = metrics["val_loss"]
-                best_path = os.path.join(
+                best_path     = os.path.join(
                     checkpoint_dir(stage), "best.pt"
                 )
+                os.makedirs(checkpoint_dir(stage), exist_ok=True)
                 torch.save({
                     "step"        : step,
                     "stage"       : stage,
@@ -367,7 +471,7 @@ def train(resume_from=None, stage=1, max_steps=None):
                 step, loss_accum, cfg,
             )
 
-    # ── Done ──────────────────────────────────────────────────
+    # ── Stage complete ────────────────────────────────────────
     print(f"\n{'═'*65}")
     print(f"  Stage {stage} complete!")
     print(f"  Total steps    : {step:,}")
@@ -379,14 +483,30 @@ def train(resume_from=None, stage=1, max_steps=None):
 # ── Entry point ───────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--resume",    type=str, default=None,
-                        help="Path to checkpoint to resume from")
-    parser.add_argument("--stage",     type=int, default=1,
-                        help="Training stage number (1-6)")
-    parser.add_argument("--max_steps", type=int, default=None,
-                        help="Override max steps from config")
+
+    parser = argparse.ArgumentParser(
+        description = "Train AnupamB-Coder-110M"
+    )
+    parser.add_argument(
+        "--resume",
+        type    = str,
+        default = None,
+        help    = "Path to checkpoint to resume from",
+    )
+    parser.add_argument(
+        "--stage",
+        type    = int,
+        default = 1,
+        help    = "Training stage (1-6)",
+    )
+    parser.add_argument(
+        "--max_steps",
+        type    = int,
+        default = None,
+        help    = "Override max steps from config",
+    )
     args = parser.parse_args()
+
     train(
         resume_from = args.resume,
         stage       = args.stage,
