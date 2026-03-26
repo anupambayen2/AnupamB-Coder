@@ -53,7 +53,8 @@ class TrainConfig:
     use_8bit_adam           = True
 
     # ── NaN protection ────────────────────────────────────────
-    max_nan_skips           = 10
+    max_nan_skips           = 10      # max consecutive NaN skips
+                                      # before emergency stop
 
     # ── Stage ─────────────────────────────────────────────────
     stage                   = 1
@@ -81,15 +82,14 @@ def evaluate(model, val_loader, cfg: TrainConfig) -> dict:
         x, y = x.to(cfg.device), y.to(cfg.device)
         with autocast(device_type="cuda", enabled=cfg.fp16):
             _, loss = model(x, y)
+
+        # Skip NaN val losses
         if torch.isfinite(loss):
             losses.append(loss.item())
 
     if not losses:
         model.train()
-        return {
-            "val_loss"  : float("nan"),
-            "perplexity": float("nan"),
-        }
+        return {"val_loss": float("nan"), "perplexity": float("nan")}
 
     avg_loss   = sum(losses) / len(losses)
     perplexity = math.exp(min(avg_loss, 20))
@@ -161,15 +161,10 @@ def load_checkpoint(
     if scaler and "scaler_state" in ckpt:
         scaler.load_state_dict(ckpt["scaler_state"])
 
-    step      = ckpt.get("step",  0)
-    loss      = ckpt.get("loss",  0.0)
-    ckpt_stage = ckpt.get("stage", 1)
-    print(
-        f"  [ckpt] resumed step {step}  "
-        f"loss {loss:.4f}  "
-        f"stage {ckpt_stage}"
-    )
-    return step, loss, ckpt_stage
+    step = ckpt.get("step", 0)
+    loss = ckpt.get("loss", 0.0)
+    print(f"  [ckpt] resumed step {step}  loss {loss:.4f}")
+    return step, loss
 
 
 # ── Logger ────────────────────────────────────────────────────
@@ -184,9 +179,7 @@ class Logger:
             f.write(json.dumps({
                 "event" : "training_start",
                 "stage" : stage,
-                "ts"    : datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
+                "ts"    : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }) + "\n")
         print(f"  Log file            : {self.path}")
 
@@ -246,7 +239,6 @@ def train(resume_from=None, stage=1, max_steps=None):
     cfg       = TrainConfig()
     cfg.stage = stage
 
-    # ── Stage-specific config ──────────────────────────────────
     if stage == 1:
         cfg.learning_rate = 3e-4
         cfg.min_lr        = 3e-5
@@ -309,7 +301,6 @@ def train(resume_from=None, stage=1, max_steps=None):
     print(f"  Checkpoint dir      : {checkpoint_dir(stage)}")
     print(f"{'─'*65}\n")
 
-    # ── Data ──────────────────────────────────────────────────
     train_loader, val_loader, vocab_size = build_dataloaders(
         batch_size  = cfg.batch_size,
         num_workers = 0,
@@ -317,7 +308,6 @@ def train(resume_from=None, stage=1, max_steps=None):
         stage       = stage,
     )
 
-    # ── Model ─────────────────────────────────────────────────
     model = GPT(GPTConfig(
         vocab_size = vocab_size,
         block_size = cfg.block_size,
@@ -336,7 +326,6 @@ def train(resume_from=None, stage=1, max_steps=None):
         print(f"  VRAM after load     : {vram:.2f} GB / 8.00 GB")
         print(f"  VRAM headroom       : {8.0 - vram:.2f} GB\n")
 
-    # ── Optimizer ─────────────────────────────────────────────
     optimizer = build_optimizer(
         model,
         cfg.learning_rate,
@@ -345,53 +334,31 @@ def train(resume_from=None, stage=1, max_steps=None):
     )
     scaler = GradScaler(enabled=cfg.fp16)
 
-    # ── Resume — smart stage detection ────────────────────────
     start_step = 0
-
     if resume_from and os.path.exists(resume_from):
-        start_step, _, ckpt_stage = load_checkpoint(
+        start_step, _ = load_checkpoint(
             model, optimizer, scaler,
             resume_from, cfg.device,
         )
-
-        if ckpt_stage == stage:
-            # ── SAME stage — continue from saved step ─────────
+        if stage > 1:
             print(
-                f"  Resuming stage {stage} "
-                f"from step {start_step}  ✅"
-            )
-            print(
-                f"  Steps remaining : "
-                f"{cfg.max_steps - start_step:,} / "
-                f"{cfg.max_steps:,}"
-            )
-        else:
-            # ── DIFFERENT stage — reset step counter ──────────
-            print(
-                f"  Stage change: {ckpt_stage} → {stage}"
-            )
-            print(
-                f"  Resetting step counter for new stage"
+                f"  Starting fresh step counter for stage {stage}"
             )
             start_step = 0
 
     print("  torch.compile       : disabled (Windows)")
     model.train()
 
-    # ── Training loop ─────────────────────────────────────────
     print(f"\n{'─'*65}")
-    print(
-        f"  Stage {stage} — "
-        f"step {start_step:,} → {cfg.max_steps:,}"
-    )
+    print(f"  Stage {stage} — starting from step {start_step}")
     print(f"{'─'*65}\n")
 
     train_iter        = iter(train_loader)
     best_val_loss     = float("inf")
     step              = start_step
     t0                = time.time()
-    nan_skip_count    = 0
-    total_nan_skipped = 0
+    nan_skip_count    = 0   # consecutive NaN skip counter
+    total_nan_skipped = 0   # total NaN batches skipped
     optimizer.zero_grad()
 
     while step < cfg.max_steps:
@@ -402,8 +369,8 @@ def train(resume_from=None, stage=1, max_steps=None):
             g["lr"] = lr
 
         # ── Gradient accumulation with NaN protection ─────────
-        loss_accum = 0.0
-        skip_step  = False
+        loss_accum  = 0.0
+        skip_step   = False
 
         for _ in range(cfg.grad_accum_steps):
             try:
@@ -424,19 +391,20 @@ def train(resume_from=None, stage=1, max_steps=None):
                     f"at step {step} — skipping batch"
                 )
                 optimizer.zero_grad()
-                skip_step         = True
-                nan_skip_count   += 1
+                skip_step        = True
+                nan_skip_count  += 1
                 total_nan_skipped += 1
 
+                # Emergency stop if too many consecutive NaNs
                 if nan_skip_count >= cfg.max_nan_skips:
                     print(
                         f"\n  [EMERGENCY STOP] "
-                        f"{nan_skip_count} consecutive NaN!\n"
-                        f"  Resume from best checkpoint:\n"
+                        f"{nan_skip_count} consecutive NaN batches!\n"
+                        f"  Model weights corrupted — "
+                        f"resume from best checkpoint:\n"
                         f"  python src/training/trainer.py "
                         f"--stage {stage} "
-                        f"--resume "
-                        f"{checkpoint_dir(stage)}/best.pt"
+                        f"--resume {checkpoint_dir(stage)}/best.pt"
                     )
                     return
                 break
@@ -444,6 +412,7 @@ def train(resume_from=None, stage=1, max_steps=None):
             scaler.scale(loss).backward()
             loss_accum += loss.item()
 
+        # Skip optimizer step if batch was NaN
         if skip_step:
             continue
 
@@ -464,18 +433,17 @@ def train(resume_from=None, stage=1, max_steps=None):
             )
             optimizer.zero_grad()
             scaler.update()
-            nan_skip_count   += 1
+            nan_skip_count  += 1
             total_nan_skipped += 1
 
             if nan_skip_count >= cfg.max_nan_skips:
                 print(
                     f"\n  [EMERGENCY STOP] "
-                    f"{nan_skip_count} consecutive NaN grads!\n"
+                    f"{nan_skip_count} consecutive NaN gradients!\n"
                     f"  Resume from best checkpoint:\n"
                     f"  python src/training/trainer.py "
                     f"--stage {stage} "
-                    f"--resume "
-                    f"{checkpoint_dir(stage)}/best.pt"
+                    f"--resume {checkpoint_dir(stage)}/best.pt"
                 )
                 return
             continue
@@ -496,19 +464,20 @@ def train(resume_from=None, stage=1, max_steps=None):
                 max_steps = cfg.max_steps,
             )
             logger.write({
-                "step"        : step,
-                "stage"       : stage,
-                "train_loss"  : round(loss_accum, 4),
-                "lr"          : round(lr, 8),
-                "grad_norm"   : round(grad_norm.item(), 4),
-                "dt_ms"       : round(dt_ms, 1),
-                "vram_gb"     : round(vram, 2) if vram else None,
-                "nan_skipped" : total_nan_skipped,
+                "step"            : step,
+                "stage"           : stage,
+                "train_loss"      : round(loss_accum, 4),
+                "lr"              : round(lr, 8),
+                "grad_norm"       : round(grad_norm.item(), 4),
+                "dt_ms"           : round(dt_ms, 1),
+                "vram_gb"         : round(vram, 2) if vram else None,
+                "nan_skipped"     : total_nan_skipped,
             })
 
         # ── Eval ──────────────────────────────────────────────
         if step % cfg.eval_interval == 0:
-            metrics    = evaluate(model, val_loader, cfg)
+            metrics = evaluate(model, val_loader, cfg)
+
             val_loss   = metrics["val_loss"]
             perplexity = metrics["perplexity"]
 
@@ -517,19 +486,20 @@ def train(resume_from=None, stage=1, max_steps=None):
                 f"(stage {stage}) {'─'*25}"
             )
 
+            # Check for NaN val loss
             if not math.isfinite(val_loss):
                 print(
                     f"     val_loss   : NaN ← model corrupted!\n"
-                    f"     Stop and resume from best.pt"
+                    f"     ACTION     : stop and resume from best.pt"
                 )
                 print()
             else:
                 print(f"     val_loss   : {val_loss:.4f}")
                 print(f"     perplexity : {perplexity:.2f}")
+
                 if total_nan_skipped > 0:
                     print(
-                        f"     nan skipped: "
-                        f"{total_nan_skipped} total"
+                        f"     nan skipped: {total_nan_skipped} total"
                     )
 
                 if val_loss < best_val_loss:
@@ -537,35 +507,29 @@ def train(resume_from=None, stage=1, max_steps=None):
                     best_path     = os.path.join(
                         checkpoint_dir(stage), "best.pt"
                     )
-                    os.makedirs(
-                        checkpoint_dir(stage), exist_ok=True
-                    )
+                    os.makedirs(checkpoint_dir(stage), exist_ok=True)
                     torch.save({
                         "step"        : step,
                         "stage"       : stage,
                         "model_state" : model.state_dict(),
                         "loss"        : best_val_loss,
                         "config"      : {
-                            "vocab_size": cfg.vocab_size,
-                            "block_size": cfg.block_size,
-                            "n_layer"   : cfg.n_layer,
-                            "n_head"    : cfg.n_head,
-                            "n_embd"    : cfg.n_embd,
+                            "vocab_size" : cfg.vocab_size,
+                            "block_size" : cfg.block_size,
+                            "n_layer"    : cfg.n_layer,
+                            "n_head"     : cfg.n_head,
+                            "n_embd"     : cfg.n_embd,
                         },
                     }, best_path)
                     print(f"     new best   → {best_path}")
                 print()
 
             logger.write({
-                "step"       : step,
-                "stage"      : stage,
-                "val_loss"   : round(val_loss, 4)
-                               if math.isfinite(val_loss)
-                               else None,
-                "perplexity" : round(perplexity, 2)
-                               if math.isfinite(perplexity)
-                               else None,
-                "nan_skipped": total_nan_skipped,
+                "step"        : step,
+                "stage"       : stage,
+                "val_loss"    : round(val_loss, 4) if math.isfinite(val_loss) else None,
+                "perplexity"  : round(perplexity, 2) if math.isfinite(perplexity) else None,
+                "nan_skipped" : total_nan_skipped,
             })
 
         # ── Periodic checkpoint ───────────────────────────────
