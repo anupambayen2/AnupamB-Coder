@@ -1,6 +1,6 @@
 """
-Test Stage 3a dataset - REAL DATA ONLY (NO SYNTHETIC)
-Verify data loading and cache building with curated real-world code
+Test Stage 3a dataset - verify data loading and cache building
+Run this before starting Stage 3a training
 
 Usage:
     cd E:\mini_gpt
@@ -17,10 +17,10 @@ sys.path.insert(0, str(project_root))
 from src.data.dataset_stage3 import build_dataloaders_stage3
 
 def test_stage3a_dataset():
-    """Test Stage 3a dataset loading - REAL DATA ONLY"""
+    """Test Stage 3a dataset loading"""
     
     print("="*70)
-    print("  STAGE 3a DATASET TEST — REAL DATA ONLY")
+    print("  STAGE 3a DATASET TEST")
     print("="*70)
     print()
     
@@ -37,15 +37,21 @@ def test_stage3a_dataset():
     
     # Expected data sources for Stage 3a
     print("Expected data sources for Stage 3a:")
-    print("  REAL curated files only:")
-    print("    • ALL .jsonl files from F:\\gpt_rawdata\\stage3\\python\\")
-    print("    • ALL .jsonl files from F:\\gpt_rawdata\\stage3\\sql\\")
+    print("  Python curated files:")
+    print("    • code_feedback.jsonl        (368 MB)")
+    print("    • evol_magicoder.jsonl       (257 MB)")
+    print("    • glaive_code.jsonl          (408 MB)")
+    print("    • python_codes_25k.jsonl     (25 MB)")
+    print("    • tested_python.jsonl        (49 MB)")
+    print()
+    print("  SQL files:")
+    print("    • sql_instruct.jsonl         (77 MB)")
     print()
     print("  Synthetic data:")
-    print("    • EXCLUDED (removed due to quality issues)")
+    print("    • python chunks 000-019      (~1.5 GB)")
+    print("    • sql chunks 000-019         (~1.2 GB)")
     print()
-    print("  Expected raw data: ~65 GB")
-    print("  Expected cache size: ~20-30 GB")
+    print("  Expected cache size: ~8 GB")
     print()
     
     # Build dataloaders
@@ -70,8 +76,11 @@ def test_stage3a_dataset():
         print(f"\n❌ ERROR: Missing data file")
         print(f"   {str(e)}")
         print("\nPlease verify:")
-        print("  1. F:\\gpt_rawdata\\stage3\\python\\ exists and has .jsonl files")
-        print("  2. F:\\gpt_rawdata\\stage3\\sql\\ exists and has .jsonl files")
+        print("  1. All curated files exist in F:\\gpt_rawdata\\stage3\\python\\")
+        print("  2. sql_instruct.jsonl exists in F:\\gpt_rawdata\\stage3\\sql\\")
+        print("  3. Synthetic chunks 000-019 exist in:")
+        print("     F:\\gpt_rawdata\\synthetic\\python\\")
+        print("     F:\\gpt_rawdata\\synthetic\\sql\\")
         return False
     
     except Exception as e:
@@ -133,7 +142,7 @@ def test_stage3a_dataset():
     print("Checking cache file...")
     print("─"*70)
     
-    cache_path = Path("E:/mini_gpt/data/processed/cache/stage3a_real_bs1024.npy")
+    cache_path = Path("E:/mini_gpt/data/processed/cache/stage3a_bs1024.npy")
     
     if cache_path.exists():
         print(f"\n✓ Cache file exists: {cache_path}")
@@ -143,15 +152,15 @@ def test_stage3a_dataset():
         print(f"  Size: {file_size_gb:.2f} GB")
         
         # Expected size check
-        if 15 <= file_size_gb <= 35:
-            print(f"  ✓ Size looks good (expected ~20-30 GB)")
-        elif file_size_gb < 15:
+        if 6 <= file_size_gb <= 10:
+            print(f"  ✓ Size looks good (expected ~8 GB)")
+        elif file_size_gb < 6:
             print(f"  ⚠️ WARNING: Cache smaller than expected")
-            print(f"     Got {file_size_gb:.2f} GB, expected ~20-30 GB")
+            print(f"     Got {file_size_gb:.2f} GB, expected ~8 GB")
             print(f"     Some data files might be missing")
         else:
             print(f"  ⚠️ WARNING: Cache larger than expected")
-            print(f"     Got {file_size_gb:.2f} GB, expected ~20-30 GB")
+            print(f"     Got {file_size_gb:.2f} GB, expected ~8 GB")
     else:
         print(f"\n⚠️ Cache file not found at: {cache_path}")
         print(f"   (This is normal if this is the first run)")
@@ -164,8 +173,7 @@ def test_stage3a_dataset():
     print("\n✅ Stage 3a dataset test PASSED!")
     print("\nAll checks completed successfully:")
     print("  ✓ Tokenizer loaded correctly")
-    print("  ✓ REAL curated data files found and processed")
-    print("  ✓ Synthetic data EXCLUDED")
+    print("  ✓ Data files found and processed")
     print("  ✓ Cache built successfully")
     print("  ✓ Train and validation loaders working")
     print("  ✓ Batch shapes correct")
@@ -173,7 +181,6 @@ def test_stage3a_dataset():
     print("  ✓ Shift relationship verified")
     
     print("\nDataset is ready for training!")
-    print("Using REAL curated data only - NO synthetic data")
     
     print("\n" + "─"*70)
     print("NEXT STEPS:")

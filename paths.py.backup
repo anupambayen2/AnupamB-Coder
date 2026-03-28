@@ -59,33 +59,14 @@ CACHE_DIR       = os.path.join(ROOT, "data", "processed", "cache")
 DATASET_CACHE   = os.path.join(CACHE_DIR, "stage0_cache.npy")
 
 # Stage-specific caches
-def stage_cache(stage) -> str:
-    """Get cache path for a stage (handles both int and str stages)"""
-    if isinstance(stage, int):
-        return os.path.join(CACHE_DIR, f"stage{stage}_cache.npy")
-    else:
-        return os.path.join(CACHE_DIR, f"stage{stage}_cache.npy")
+def stage_cache(stage: int) -> str:
+    return os.path.join(CACHE_DIR, f"stage{stage}_cache.npy")
 
 # ── E: Checkpoints ────────────────────────────────────────────
 CHECKPOINT_BASE = os.path.join(ROOT, "checkpoints")
 
-def checkpoint_dir(stage) -> str:
-    """
-    Get checkpoint directory for a stage.
-    Handles both integer stages (1, 2, 4, 5, 6) and string stages (3a, 3b, 3c, 3d).
-    
-    Examples:
-        checkpoint_dir(1)    -> checkpoints/run_001
-        checkpoint_dir(2)    -> checkpoints/run_002
-        checkpoint_dir("3a") -> checkpoints/run_3a
-        checkpoint_dir("3b") -> checkpoints/run_3b
-    """
-    if isinstance(stage, int):
-        # Integer stages: format with leading zeros (run_001, run_002, etc.)
-        return os.path.join(CHECKPOINT_BASE, f"run_{stage:03d}")
-    else:
-        # String stages: use as-is (run_3a, run_3b, run_3c, run_3d)
-        return os.path.join(CHECKPOINT_BASE, f"run_{stage}")
+def checkpoint_dir(stage: int) -> str:
+    return os.path.join(CHECKPOINT_BASE, f"run_{stage:03d}")
 
 # Convenience shortcuts
 CHECKPOINT_DIR  = checkpoint_dir(1)   # current active stage
@@ -95,26 +76,10 @@ BEST_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "best.pt")
 LOG_DIR  = os.path.join(ROOT, "logs")
 LOG_PATH = os.path.join(ROOT, "logs", "train_log.jsonl")
 
-def stage_log(stage) -> str:
-    """
-    Get log file path for a stage.
-    Handles both integer stages (1, 2, 4, 5, 6) and string stages (3a, 3b, 3c, 3d).
-    
-    Examples:
-        stage_log(1)    -> logs/stage001_log.jsonl
-        stage_log(2)    -> logs/stage002_log.jsonl
-        stage_log("3a") -> logs/stage3a_log.jsonl
-        stage_log("3b") -> logs/stage3b_log.jsonl
-    """
-    if isinstance(stage, int):
-        # Integer stages: format with leading zeros (stage001, stage002, etc.)
-        return os.path.join(LOG_DIR, f"stage{stage:03d}_log.jsonl")
-    else:
-        # String stages: use as-is (stage3a, stage3b, etc.)
-        return os.path.join(LOG_DIR, f"stage{stage}_log.jsonl")
+def stage_log(stage: int) -> str:
+    return os.path.join(LOG_DIR, f"stage{stage}_log.jsonl")
 
 # ── Create all E: directories on import ───────────────────────
-# UPDATED: Now creates directories for Stage 3 sub-stages (3a, 3b, 3c, 3d)
 for _d in [
     PROCESSED_DIR,
     CACHE_DIR,
@@ -122,10 +87,7 @@ for _d in [
     LOG_DIR,
     checkpoint_dir(1),
     checkpoint_dir(2),
-    checkpoint_dir("3a"),  # Stage 3 sub-stages (string format)
-    checkpoint_dir("3b"),
-    checkpoint_dir("3c"),
-    checkpoint_dir("3d"),
+    checkpoint_dir(3),
     checkpoint_dir(4),
     checkpoint_dir(5),
     checkpoint_dir(6),
